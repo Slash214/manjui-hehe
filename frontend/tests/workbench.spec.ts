@@ -1,0 +1,71 @@
+import { test, expect } from '@playwright/test';
+
+const apiUrl=process.env.API_URL ?? 'http://127.0.0.1:8000';
+
+test('stage one authoring, two-tab conflict, persistence and dark desktop layouts', async ({page, context, request}) => {
+  const auth = await request.post(`${apiUrl}/api/v1/auth/register`, {data:{email:`browser-${Date.now()}@example.com`,password:'test-password-123'}});
+  expect(auth.ok()).toBeTruthy();
+  const token = (await auth.json()).access_token;
+  const headers={Authorization:`Bearer ${token}`};
+  async function post(path:string, data:object){const r=await request.post(`${apiUrl}/api/v1${path}`,{headers,data});expect(r.ok(),await r.text()).toBeTruthy();return r.json();}
+  const me=await (await request.get(`${apiUrl}/api/v1/me`,{headers})).json();
+  const project=await post('/projects',{name:'大唐小饭馆',style_prompt:'唐代市井生活，电影光影'});
+  const episode=await post(`/projects/${project.id}/episodes`,{title:'一碗饭的转机',episode_no:1});
+  const scene=await post(`/episodes/${episode.id}/scenes`,{title:'饭馆大堂',time_of_day:'白天'});
+  const line=await post(`/scenes/${scene.id}/lines`,{text:'三个月房租，今天必须结清！'});
+  const character=await post(`/projects/${project.id}/assets`,{asset_type:'character',name:'沈知味'});
+  const version=await post(`/assets/${character.id}/versions`,{base_version:1,description:'青色衣衫，神情沉稳'});
+  const shot=await post(`/episodes/${episode.id}/shots`,{scene_id:scene.id,action_desc:'掌柜拍桌，沈知味抬头',est_duration_ms:6000});
+  await post(`/episodes/${episode.id}/shots`,{scene_id:scene.id,action_desc:'沈知味端起饭碗',order_no:1});
+  const refs=await request.put(`${apiUrl}/api/v1/shots/${shot.id}/refs`,{headers,data:{base_version:1,asset_version_ids:[version.id]}});
+  expect(refs.ok()).toBeTruthy();
+  const bindings=await request.put(`${apiUrl}/api/v1/shots/${shot.id}/lines`,{headers,data:{base_version:2,line_ids:[line.id]}});
+  expect(bindings.ok()).toBeTruthy();
+  await context.addInitScript(({token,id})=>{localStorage.setItem('token',token);localStorage.setItem('userId',id);},{token,id:me.id});
+  const url=`/episodes/${episode.id}/director?shot=${shot.id}`;
+  await page.goto(url);
+  await expect(page.getByLabel('镜头动作')).toHaveValue('掌柜拍桌，沈知味抬头');
+  const second=await context.newPage();await second.goto(url);
+  await expect(second.getByLabel('镜头动作')).toHaveValue('掌柜拍桌，沈知味抬头');
+  await page.getByLabel('镜头动作').fill('掌柜放下饭碗，沉默片刻');
+  await expect.poll(async()=> (await (await request.get(`${apiUrl}/api/v1/shots/${shot.id}`,{headers})).json()).action_desc).toBe('掌柜放下饭碗，沉默片刻');
+  await second.getByLabel('镜头动作').fill('另一页签的未保存修改');
+  await expect(second.getByText('版本冲突：其他页签已保存。请复制本地内容，再载入最新版本。')).toBeVisible();
+  await expect(second.getByLabel('镜头动作')).toHaveValue('另一页签的未保存修改');
+  await second.setViewportSize({width:1366,height:768});
+  await second.screenshot({path:'../docs/screenshots/conflict-1366.png',fullPage:true});
+  await second.close();
+  await page.reload();await expect(page.getByLabel('镜头动作')).toHaveValue('掌柜放下饭碗，沉默片刻');
+  await page.getByRole('link',{name:/01.*故事/}).click();
+  await expect(page).toHaveURL(new RegExp(`shot=${shot.id}`));
+  await page.getByRole('link',{name:/03.*导演/}).click();
+  await expect(page.getByLabel('镜头动作')).toHaveValue('掌柜放下饭碗，沉默片刻');
+  await page.getByText('高级参数',{exact:true}).click();
+  await page.getByLabel('镜头参数 JSON').fill('{"seed":42}');
+  await expect.poll(async()=> (await (await request.get(`${apiUrl}/api/v1/shots/${shot.id}`,{headers})).json()).params_json.seed).toBe(42);
+  await page.getByText('高级参数',{exact:true}).click();
+  await page.locator('.inspector').evaluate(element=>{element.scrollTop=0;});
+  for(const size of [{width:1440,height:900},{width:1366,height:768}]){
+    await page.setViewportSize(size);
+    await expect(page.getByLabel('镜头动作')).toBeVisible();
+    const metrics=await page.evaluate(()=>({overflow:document.documentElement.scrollWidth>innerWidth,fonts:[...new Set([...document.querySelectorAll('body *')].filter(e=>e.textContent?.trim()).map(e=>getComputedStyle(e).fontSize))],border:getComputedStyle(document.querySelector('.shot-card')!).borderTopWidth,bg:getComputedStyle(document.body).backgroundColor}));
+    expect(metrics.overflow).toBe(false);
+    expect(metrics.fonts.every(s=>parseFloat(s)>=12)).toBe(true);
+    console.log(JSON.stringify({size,...metrics}));
+    await page.screenshot({path:`../docs/screenshots/director-${size.width}.png`,fullPage:true});
+  }
+  const disposableName=`弹窗验证-${Date.now()}`;
+  const disposable=await post('/projects',{name:disposableName});
+  await page.goto('/');
+  const row=page.locator('.list-row').filter({hasText:disposableName});
+  await row.getByRole('button',{name:'删除',exact:true}).click();
+  await expect(page.getByRole('dialog')).toBeVisible();
+  await expect(page.getByText('历史版本将保留。',{exact:true})).toBeVisible();
+  await page.screenshot({path:'../docs/screenshots/ant-delete-confirm-1366.png',fullPage:true});
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await expect(row).toBeVisible();
+  await row.getByRole('button',{name:'删除',exact:true}).click();
+  await page.getByRole('button',{name:'确认删除',exact:true}).click();
+  await expect(row).toHaveCount(0);
+  expect((await request.get(`${apiUrl}/api/v1/projects/${disposable.id}`,{headers})).status()).toBe(404);
+});

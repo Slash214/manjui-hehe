@@ -1,0 +1,22 @@
+import { GenerationPanel } from '../components/GenerationPanel';
+import { useState } from 'react';
+import { api, Entity } from '../api/client';
+import { Action, Add, LoadError, useList } from '../components/Common';
+import { Editor } from '../components/Editor';
+
+const types = [['character','角色'],['costume','造型'],['location','地点'],['prop','道具'],['voice','音色']];
+export function Assets({projectId}: {projectId: string}) {
+  const assets = useList(`/projects/${projectId}/assets`); const [type,setType]=useState('character'); const [selected,setSelected]=useState(''); const [parent,setParent]=useState('');
+  const current = assets.data?.find(a => a.id===selected);
+  return <section><nav>{types.map(([value,label]) => <button key={value} className={type===value?'active':''} onClick={() => {setType(value);setSelected('');}}>{label}</button>)}</nav><LoadError error={assets.error}/><div className="workspace"><aside className="panel"><h2>{types.find(x=>x[0]===type)?.[1]}资产</h2>
+    {type==='costume' && <label>所属角色<select value={parent} onChange={e=>setParent(e.target.value)}><option value="">请选择角色</option>{assets.data?.filter(a=>a.asset_type==='character').map(a=><option key={a.id} value={a.id}>{String(a.name)}</option>)}</select></label>}
+    {(type!=='costume'||parent) && <Add path={`/projects/${projectId}/assets`} label="资产名称" data={{asset_type:type,...(type==='costume'?{parent_asset_id:parent}:{})}}/>}
+    {assets.data?.filter(a=>a.asset_type===type).map(a=><button className={`asset-card ${selected===a.id?'active':''}`} key={a.id} onClick={()=>setSelected(a.id)}><strong>{String(a.name)}</strong><small>{a.current_version_id?'已有当前版本':'待创建版本'}</small></button>)}</aside>
+    <div className="panel">{current?<AssetDetail key={current.id} asset={current}/>:<p className="empty">选择左侧资产，查看版本或创建参考图版本。</p>}</div></div></section>;
+}
+function AssetDetail({asset}: {asset: Entity}) {
+  const [params,setParams]=useState('{}'),[voice,setVoice]=useState('{}');
+  const versions=useList(`/assets/${asset.id}/versions`); const [description,setDescription]=useState(''),[prompt,setPrompt]=useState(''),[file,setFile]=useState<File|null>(null),[preview,setPreview]=useState('');
+  return <><h2>{String(asset.name)}</h2><Editor entity={asset} path={`/assets/${asset.id}`} fields={[{key:'name',label:'资产名称'}]}/><details className="version-create"><summary>追加版本</summary><label>描述<textarea value={description} onChange={e=>setDescription(e.target.value)}/></label><label>提示词<textarea value={prompt} onChange={e=>setPrompt(e.target.value)}/></label><details><summary>版本参数</summary><label>参数 JSON<textarea value={params} onChange={e=>setParams(e.target.value)}/></label>{asset.asset_type==='voice'&&<label>音色配置 JSON<textarea value={voice} onChange={e=>setVoice(e.target.value)}/></label>}</details><Action run={()=>{let p:unknown,v:unknown;try{p=JSON.parse(params);v=JSON.parse(voice);}catch{throw new Error('请输入有效的 JSON 对象。');}if(!p||!v||typeof p!=='object'||typeof v!=='object'||Array.isArray(p)||Array.isArray(v))throw new Error('参数必须是 JSON 对象。');return api(`/assets/${asset.id}/versions`,'POST',{base_version:asset.version,description,prompt,params_json:p,voice_config_json:v});}}>创建新版本</Action></details><LoadError error={versions.error}/><h3>版本历史</h3><p className="muted">上传图片将追加一个新版本，旧版本和镜头引用保持原样。</p><input aria-label="参考图文件" type="file" accept="image/png,image/jpeg,image/webp" onChange={e=>setFile(e.target.files?.[0]??null)}/>
+    {versions.data?.map(v=><article className="version" key={v.id}><div className="actions"><strong>版本 {String(v.version_no)}</strong>{asset.current_version_id===v.id&&<span className="tag">当前版本</span>}</div><p>{String(v.description)}</p><pre>{String(v.prompt)}</pre><div className="actions"><Action run={()=>api(`/assets/${asset.id}/set-current`,'POST',{base_version:asset.version,version_id:v.id})}>设为当前</Action><Action disabled={!file} run={async()=>{if(!file)return; const form=new FormData();form.append('file',file);form.append('base_version',String(asset.version));await api(`/asset-versions/${v.id}/reference-image`,'POST',form);}}>由此版本上传参考图</Action>{Boolean(v.reference_file_id)&&<Action run={async()=>{const result=await api<{url:string}>(`/files/${v.reference_file_id}/url`);setPreview(result.url);}}>查看参考图</Action>}</div><details><summary>生成参考图</summary><GenerationPanel target={{...v,version:asset.version}} asset projectId={String(asset.project_id)}/></details></article>)}{preview&&<img className="reference" src={preview} alt="资产参考图"/>}</>;
+}

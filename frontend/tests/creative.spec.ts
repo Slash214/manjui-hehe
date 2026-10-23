@@ -1,0 +1,37 @@
+import {test,expect} from '@playwright/test';
+const apiUrl=process.env.API_URL??'http://127.0.0.1:8000';
+test('creative mock candidate preview, explicit adoption, persisted history and model configuration',async({page,context,request})=>{
+  const auth=await request.post(`${apiUrl}/api/v1/auth/register`,{data:{email:`creative-${Date.now()}@example.com`,password:'test-password-123'}});
+  expect(auth.ok()).toBeTruthy();const token=(await auth.json()).access_token;
+  const headers={Authorization:`Bearer ${token}`};
+  async function post(path:string,data:object){const r=await request.post(`${apiUrl}/api/v1${path}`,{headers,data});expect(r.ok(),await r.text()).toBeTruthy();return r.json();}
+  const project=await post('/projects',{name:'创作流程验证'});
+  const ep=await post(`/projects/${project.id}/episodes`,{title:'第一集'});
+  const me=await(await request.get(`${apiUrl}/api/v1/me`,{headers})).json();
+  await context.addInitScript(({token,id})=>{localStorage.setItem('token',token);localStorage.setItem('userId',id);},{token,id:me.id});
+  await page.goto('/settings/models');
+  await page.getByLabel('显示测试配置').check();
+  await page.getByLabel('协议',{exact:true}).selectOption('mock');
+  await page.getByLabel('配置名称',{exact:true}).fill('演示文本模型');
+  await page.getByRole('button',{name:'保存模型配置'}).click();
+  await expect(page.getByText('演示文本模型 / 文本')).toBeVisible();
+  await page.goto(`/episodes/${ep.id}/story`);
+  await page.getByText('AI 编剧与对白',{exact:true}).click();
+  await page.getByLabel('显示测试模型').check();
+  await page.getByLabel('模型',{exact:true}).selectOption({label:'演示文本模型 / 测试演示'});
+  await page.getByLabel('创作要求').fill('掌柜放下碗，沉默片刻。');
+  await page.getByRole('button',{name:'生成创作候选'}).click();
+  await expect(page.getByText('演示结果',{exact:true})).toBeVisible();
+  const before=await request.get(`${apiUrl}/api/v1/episodes/${ep.id}/script`,{headers});
+  expect((await before.json()).scenes).toHaveLength(0);
+  await page.setViewportSize({width:1366,height:768});
+  await page.screenshot({path:'../docs/screenshots/creative-candidate-1366.png',fullPage:true});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)).toBe(false);
+  await page.getByRole('button',{name:'采用此候选'}).click();
+  await expect(page.getByRole('button',{name:'已采用',exact:true})).toBeDisabled();
+  const after=await request.get(`${apiUrl}/api/v1/episodes/${ep.id}/script`,{headers});
+  expect((await after.json()).scenes).toHaveLength(1);
+  await page.reload();await page.getByText('AI 编剧与对白',{exact:true}).click();await expect(page.getByRole('button',{name:/剧本草稿 \/ 已采用/})).toBeVisible();
+  await page.getByRole('link',{name:/03.*导演/}).click();
+  await expect(page.getByText('AI 分镜与画面',{exact:true})).toBeVisible();
+});

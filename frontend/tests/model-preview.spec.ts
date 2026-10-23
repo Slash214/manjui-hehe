@@ -1,0 +1,22 @@
+import {test,expect} from '@playwright/test';
+import fs from 'node:fs';
+test('controlled HTTP output persisted in MinIO is visible in director and asset versions',async({page,context})=>{
+  test.skip(!process.env.MODEL_PREVIEW_FILE,'Requires controlled HTTP verification fixture');
+  const data=JSON.parse(fs.readFileSync(process.env.MODEL_PREVIEW_FILE!,'utf8'));
+  await context.addInitScript(({token,id})=>{localStorage.setItem('token',token);localStorage.setItem('userId',id);},{token:data.token,id:data.user_id});
+  await page.setViewportSize({width:1366,height:768});
+  await page.goto(`/episodes/${data.episode_id}/director?shot=${data.shot_id}`);
+  const preview=page.getByAltText('已采用关键画面');
+  await expect(preview).toBeVisible();
+  await expect.poll(()=>preview.evaluate(img=>(img as HTMLImageElement).naturalWidth)).toBe(32);
+  await page.screenshot({path:'../docs/screenshots/http-image-director-1366.png',fullPage:true});
+  await page.getByText('AI 分镜与画面',{exact:true}).click();
+  await page.getByRole('button',{name:/生成关键画面 \/ 已采用/}).first().click();
+  await expect(page.getByAltText('生成画面候选')).toBeVisible();
+  await page.getByRole('link',{name:/02.*资产/}).click();
+  await expect(page).toHaveURL(new RegExp(`shot=${data.shot_id}`));
+  await page.getByRole('button',{name:/掌柜.*已有当前版本/}).click();
+  await expect(page.getByText('版本 2',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'查看参考图'}).click();
+  await expect(page.getByAltText('资产参考图')).toBeVisible();
+});
